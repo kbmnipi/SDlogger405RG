@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 
 def parse_file(f):
     data = f.read()
-    if len(data) < 256 + 16:
-        raise ValueError("File too short")
+    if len(data) < 256:
+        raise ValueError("File too short for header")
 
     # 1. Читаем заголовок
     header_bytes = data[:256]
@@ -31,28 +31,29 @@ def parse_file(f):
         'start_ts': header[11], 'record_count': header[12], 'header_crc': header[13]
     }
 
-    # 2. Отрезаем трейлер (последние 16 байт) и парсим данные
-    payload_data = data[256:-16]
-    trailer_bytes = data[-16:]
-    
+    # 2. Читаем данные чанк за чанком (без вырезания трейлера заранее)
     chunks = []
-    pos = 0
-    while pos < len(payload_data):
-        if len(payload_data) - pos < 6:
-            raise ValueError("Unexpected EOF in chunk header")
-        
-        chunk_hdr = payload_data[pos:pos+6]
-        pos += 6
+    pos = 256
+    payload_crc = 0xFFFFFFFF
+    
+    while pos + 6 <= len(data):
+        chunk_hdr = data[pos:pos+6]
         seq, count = struct.unpack('<IH', chunk_hdr)
         
+        # Если count не равен 2048, возможно, мы наткнулись на трейлер или мусор
         if count > 2048:
-            raise ValueError(f"Chunk {seq} has invalid sample_count {count}")
+            break
             
-        if len(payload_data) - pos < count * 6:
-            raise ValueError(f"Unexpected EOF inside chunk {seq} data")
+        chunk_data_len = count * 6
+        if pos + 6 + chunk_data_len > len(data):
+            print(f"⚠️ Warning: File truncated during chunk {seq}. Ignoring incomplete tail.")
+            break
             
-        data_bytes = payload_data[pos:pos+count*6]
-        pos += count * 6
+        data_bytes = data[pos+6 : pos+6+chunk_data_len]
+        
+        # Накапливаем CRC для чанка
+        payload_crc = zlib.crc32(chunk_hdr, payload_crc)
+        payload_crc = zlib.crc32(data_bytes, payload_crc)
         
         records = []
         for i in range(count):
@@ -60,15 +61,22 @@ def parse_file(f):
             records.append({'x': x, 'y': y, 'z': z})
             
         chunks.append({'seq_number': seq, 'sample_count': count, 'records': records})
+        
+        pos += 6 + chunk_data_len
 
-    # 3. Читаем трейлер
-    end_ts, total_records, file_crc32 = struct.unpack('<QII', trailer_bytes)
-    calc_crc = zlib.crc32(payload_data) # Python zlib делает всё правильно автоматически
-    
-    trailer_dict = {
-        'end_ts': end_ts, 'total_records': total_records,
-        'file_crc32': file_crc32, 'calc_file_crc': calc_crc
-    }
+    # 3. Пытаемся прочитать трейлер (если файл был корректно закрыт)
+    trailer_dict = None
+    if pos + 16 <= len(data):
+        trailer_bytes = data[pos:pos+16]
+        end_ts, total_records, file_crc32 = struct.unpack('<QII', trailer_bytes)
+        calc_crc = payload_crc ^ 0xFFFFFFFF
+        trailer_dict = {
+            'end_ts': end_ts, 'total_records': total_records,
+            'file_crc32': file_crc32, 'calc_file_crc': calc_crc
+        }
+    else:
+        print("⚠️ Warning: No trailer found (file was cut off / power loss)")
+
     return header_dict, chunks, trailer_dict
 
 def format_ts(ts_ms):
@@ -91,7 +99,6 @@ def main():
 
     print(f"\n--- HEADER ---")
     print(f"Sensor: {header['sensor']} | Sample Rate: {header['sample_rate']} Hz")
-    print(f"Record Count (Header): {header['record_count']}")
     
     print(f"\n--- PAYLOAD ---")
     print(f"Number of Chunks: {len(chunks)}")
@@ -106,9 +113,7 @@ def main():
     
     if trailer:
         print(f"\n--- TRAILER ---")
-        print(f"Total Records (Trailer): {trailer['total_records']}")
-        print(f"File CRC32: {trailer['file_crc32']:08X}")
-        print(f"Calc CRC32: {trailer['calc_file_crc']:08X} -> {'✅ MATCH' if trailer['file_crc32'] == trailer['calc_file_crc'] else '❌ MISMATCH'}")
+        print(f"File CRC32: {trailer['file_crc32']:08X} -> {'✅ MATCH' if trailer['file_crc32'] == trailer['calc_file_crc'] else '❌ MISMATCH'}")
     
     if args.plot and chunks:
         print("\nRendering plot...")
