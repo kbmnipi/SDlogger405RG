@@ -1,0 +1,119 @@
+#include "main.h"
+#include "sdio.h"
+#include "gpio.h"
+#include <string.h>
+
+void SystemClock_Config(void);
+
+uint8_t tx_buf[512] __attribute__((aligned(4)));
+uint8_t rx_buf[512] __attribute__((aligned(4)));
+
+// Функция мигания кодом ошибки
+void blink_code(int code) {
+    while(1) {
+        for(int i=0; i<code; i++) {
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET);
+            HAL_Delay(200);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+            HAL_Delay(200);
+        }
+        HAL_Delay(1000);
+    }
+}
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_SDIO_SD_Init(); 
+
+    // ТЕСТ 1: Читаем сектор 0 (MBR). 
+    // На отформатированной карте последние 2 байта этого сектора должны быть 0x55, 0xAA.
+    if (HAL_SD_ReadBlocks(&hsd, rx_buf, 0, 1, 2000) != HAL_OK) {
+        blink_code(5); // 5 вспышек = Ошибка ЧТЕНИЯ нулевого сектора (линия D0/PC8 не работает)
+    }
+    if (rx_buf[510] != 0x55 || rx_buf[511] != 0xAA) {
+        blink_code(6); // 6 вспышек = Сектор прочитан, но данные не те (мусор на шине)
+    }
+
+    // ТЕСТ 2: Запись в сектор 1000
+    for (int i = 0; i < 512; i++) tx_buf[i] = (uint8_t)i;
+    if (HAL_SD_WriteBlocks(&hsd, tx_buf, 1000, 1, 2000) != HAL_OK) {
+        blink_code(4); // 4 вспышки = Ошибка записи
+    }
+
+    // Даем карте 100 мс на то, чтобы записать данные во внутреннюю память (NAND)
+    HAL_Delay(100);
+
+    // ТЕСТ 3: Чтение из сектора 1000
+    if (HAL_SD_ReadBlocks(&hsd, rx_buf, 1000, 1, 2000) != HAL_OK) {
+        blink_code(7); // 7 вспышек = Ошибка чтения после записи (карта зависла)
+    }
+
+    // ТЕСТ 4: Сравнение данных
+    if (memcmp(tx_buf, rx_buf, 512) != 0) {
+        blink_code(8); // 8 вспышек = Данные не совпали
+    }
+
+    // УСПЕХ!!!
+    while (1) {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET);
+        HAL_Delay(1000);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+        HAL_Delay(1000);
+    }
+}
+
+// ... SystemClock_Config ...
+/**
+  * @brief System Clock Configuration (copied from main.c).
+  *        HSE 8 MHz -> PLL: M=4, N=168, P=2 => SYSCLK = 168 MHz.
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE
+                              |RCC_OSCILLATORTYPE_LSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 168;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+void Error_Handler(void) {
+    blink_code(2); // 2 вспышки = Ошибка SDIO Init
+}
